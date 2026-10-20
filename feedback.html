@@ -91,6 +91,7 @@
 <section class="card done" id="done" hidden>
   <h2>Feedback saved &#10003;</h2>
   <p>The link is now in the student's row in the Sheet. You can close this page.</p>
+  <div class="msg good" id="receipt"></div>
 </section>
 </div>
 
@@ -130,6 +131,7 @@ function problem(t){ $('problemText').textContent = t; show('problem'); }
 let stream, rec, mctx, analyser, srcNode, meterTimer = null, tick = null, wakeLock = null;
 let chunks = [], recMime = '', isRec = false, startedAt = 0;
 let liveSilentSince = null, interruptions = [];
+let uploadId = '', sending = false;
 let finalBlob = null, finalExt = 'mp3', finalMime = 'audio/mpeg', needsConfirm = false, sent = false;
 
 const fmt = s => String(Math.floor(s/60)).padStart(2,'0') + ':' + String(Math.floor(s%60)).padStart(2,'0');
@@ -266,6 +268,7 @@ async function onRecorderStopped(){
   }
   if (blob){ finalBlob = blob; finalExt = 'mp3'; finalMime = 'audio/mpeg'; }
   else { finalBlob = raw; finalMime = (raw.type || 'audio/webm').split(';')[0]; finalExt = /mp4|aac/.test(finalMime) ? 'm4a' : /ogg/.test(finalMime) ? 'ogg' : 'webm'; }
+  uploadId = newId();
   unbusy();
   showResult(report, wall, !!blob);
 }
@@ -365,20 +368,69 @@ $('btnRedo').addEventListener('click', () => {
   $('strip').hidden = true; $('stripNote').hidden = true; checkMsg(''); $('timer').textContent = '00:00'; startRec();
 });
 
+/* ---------- upload: one ID per recording, progress, automatic retry, "did it arrive?" check ---------- */
+function newId(){
+  try { if (window.crypto && crypto.randomUUID) return crypto.randomUUID().replace(/-/g, ''); } catch(e){}
+  return Date.now().toString(36) + Math.random().toString(36).slice(2, 12) + Math.random().toString(36).slice(2, 10);
+}
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+function postJson(obj, onProg, timeoutMs){
+  return new Promise((res, rej) => {
+    const x = new XMLHttpRequest();
+    x.open('POST', ENDPOINT); x.setRequestHeader('Content-Type', 'text/plain;charset=utf-8'); x.timeout = timeoutMs;
+    x.upload.onprogress = e => { if (e.lengthComputable) onProg(e.loaded / e.total); };
+    x.upload.onload = () => onProg(1);
+    x.onload = () => { try { res(JSON.parse(x.responseText)); } catch(e){ rej(new Error('bad reply')); } };
+    x.onerror = () => rej(new Error('network')); x.ontimeout = () => rej(new Error('timeout'));
+    x.send(JSON.stringify(obj));
+  });
+}
+async function alreadySaved(){
+  try { const r = await fetch(ENDPOINT + '?action=status&id=' + encodeURIComponent(uploadId) + '&t=' + Date.now()); const d = await r.json(); return (d.ok && d.saved) ? d.receipt : null; }
+  catch(e){ return null; }
+}
+function reportFail(err){
+  try { fetch(ENDPOINT, { method:'POST', keepalive:true, headers:{'Content-Type':'text/plain;charset=utf-8'},
+    body: JSON.stringify({ action:'report', where:'feedback', key:KEY, name:studentName, id:uploadId, error:String(err), ua:navigator.userAgent }) }).catch(()=>{}); } catch(e){}
+}
+function finishSaved(rc){
+  sent = true; unbusy();
+  $('receipt').textContent = 'Receipt ' + (rc && rc.code ? rc.code : '') + ' · saved ' + (rc && rc.time ? rc.time : '') + (rc && rc.kb ? ' · ' + rc.kb + ' KB' : '') + '. You can take a screenshot of this.';
+  show('done');
+}
+
 $('btnSend').addEventListener('click', async () => {
-  if (!finalBlob) return;
+  if (!finalBlob || sending) return;
+  sending = true;
   const b = $('btnSend'), m = $('sendMsg'); m.hidden = true;
-  b.disabled = true; b.textContent = 'Sending… please wait'; getWakeLock();
+  b.disabled = true; b.textContent = 'Sending…'; getWakeLock();
+  const MAX = 4; let lastErr = '', fatal = false;
   try {
-    const r = await fetch(ENDPOINT, { method:'POST', headers:{'Content-Type':'text/plain;charset=utf-8'},
-      body: JSON.stringify({ action:'feedback', row:ROW, key:KEY, name:studentName, ext:finalExt, mime:finalMime, audio: await toB64(finalBlob) }) });
-    const d = await r.json();
-    if (!d.ok) throw new Error(d.error || 'error');
-    sent = true; show('done');
+    busy('Getting ready…', 2);
+    const payload = { action:'feedback', id:uploadId, row:ROW, key:KEY, name:studentName, ext:finalExt, mime:finalMime, audio: await toB64(finalBlob) };
+    for (let n = 1; n <= MAX; n++){
+      const tryTxt = n === 1 ? 'Sending… keep this page open.' : 'Sending again (try ' + n + ' of ' + MAX + ')… keep this page open.';
+      busy(tryTxt, 3);
+      try {
+        const d = await postJson(payload, f => busy(f < 1 ? tryTxt : 'Saving to Drive… please wait.', f < 1 ? 3 + Math.round(f*77) : 90), 150000);
+        if (d.ok){ finishSaved(d.receipt); return; }
+        lastErr = d.error || 'error';
+        if (/bad key|sheet changed|bad row|No audio/i.test(lastErr)){ fatal = true; break; }
+      } catch(e){ lastErr = e.message; }
+      // it may have been saved even though the answer never came back
+      busy('Checking if it arrived…', 92);
+      await sleep(2500);
+      const rc = await alreadySaved(); if (rc){ finishSaved(rc); return; }
+      if (n < MAX){ busy('Connection is weak. Trying again in a moment…', 5); await sleep(2500 * n); }
+    }
+    unbusy();
+    if (!fatal) reportFail(lastErr);
+    m.textContent = fatal ? ('Could not save: ' + lastErr) : 'Could not send after several tries. Your recording is still here. Move to a place with better internet and tap the button again. It is safe to tap more than once.';
+    m.hidden = false; b.disabled = false; b.textContent = needsConfirm ? 'Send anyway' : 'Send feedback';
   } catch(e){
+    unbusy(); m.textContent = 'Something went wrong on this phone: ' + e.message + '. Tap the button again.'; m.hidden = false;
     b.disabled = false; b.textContent = needsConfirm ? 'Send anyway' : 'Send feedback';
-    m.textContent = 'Could not send. Your recording is still here. Check the internet and tap the button again.'; m.hidden = false;
-  } finally { dropWakeLock(); }
+  } finally { sending = false; dropWakeLock(); }
 });
 </script>
 </body>
