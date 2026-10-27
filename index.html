@@ -193,6 +193,7 @@
 
 </div>
 
+<p class="hint" style="text-align:center">page v3</p>
 <!-- lame.min.js must sit in the same folder as this page. If it is missing, the form still works but sends a bigger file. -->
 <script src="lame.min.js"></script>
 <script>
@@ -373,22 +374,22 @@ function newId(){
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 12) + Math.random().toString(36).slice(2, 10);
 }
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-function upShow(t, pct){ $('upBox').hidden = false; $('upText').textContent = t; $('upBar').value = pct || 0; }
+function upShow(t, pct){ $('upBox').hidden = false; $('upText').textContent = t; if (pct === undefined) $('upBar').removeAttribute('value'); else $('upBar').value = pct; }
 function upHide(){ $('upBox').hidden = true; }
 async function getWakeLock(){ try { if (navigator.wakeLock) wakeLock = await navigator.wakeLock.request('screen'); } catch(e){} }
 function dropWakeLock(){ try { if (wakeLock) wakeLock.release(); } catch(e){} wakeLock = null; }
 window.addEventListener('beforeunload', e => { if (sending){ e.preventDefault(); e.returnValue = ''; } });
 
-function postJson(obj, onProg, timeoutMs){
-  return new Promise((res, rej) => {
-    const x = new XMLHttpRequest();
-    x.open('POST', ENDPOINT); x.setRequestHeader('Content-Type', 'text/plain;charset=utf-8'); x.timeout = timeoutMs;
-    x.upload.onprogress = e => { if (e.lengthComputable) onProg(e.loaded / e.total); };
-    x.upload.onload = () => onProg(1);
-    x.onload = () => { try { res(JSON.parse(x.responseText)); } catch(e){ rej(new Error('bad reply')); } };
-    x.onerror = () => rej(new Error('network')); x.ontimeout = () => rej(new Error('timeout'));
-    x.send(JSON.stringify(obj));
-  });
+// NOTE: plain fetch on purpose. A progress listener on XMLHttpRequest makes the browser ask Google for permission first, and Apps Script blocks that.
+async function postJson(obj, timeoutMs){
+  const ac = new AbortController(), tm = setTimeout(() => ac.abort(), timeoutMs);
+  let txt;
+  try {
+    const r = await fetch(ENDPOINT, { method:'POST', headers:{'Content-Type':'text/plain;charset=utf-8'}, body: JSON.stringify(obj), signal: ac.signal });
+    txt = await r.text();
+  } catch(e){ throw new Error(e.name === 'AbortError' ? 'timeout' : 'network (' + e.message + ')'); }
+  finally { clearTimeout(tm); }
+  try { return JSON.parse(txt); } catch(e){ throw new Error('got a web page instead of data: ' + txt.replace(/\s+/g,' ').slice(0, 100)); }
 }
 async function alreadySaved(){
   try { const r = await fetch(ENDPOINT + '?action=status&id=' + encodeURIComponent(submitId) + '&t=' + Date.now()); const d = await r.json(); return (d.ok && d.saved) ? d.receipt : null; }
@@ -413,13 +414,16 @@ async function sendSubmission(payload, isAssess){
   const MAX = 4; let lastErr = '', fatal = false;
   for (let n = 1; n <= MAX; n++){
     const tryTxt = n === 1 ? 'Sending… please keep this page open.' : 'Sending again (try ' + n + ' of ' + MAX + ')… please keep this page open.';
-    upShow(tryTxt, 3);
+    upShow(tryTxt);
+    const t0 = Date.now(), iv = setInterval(() => upShow(tryTxt + ' (' + Math.round((Date.now() - t0) / 1000) + ' s)'), 1000);
     try {
-      const d = await postJson(payload, f => upShow(f < 1 ? tryTxt : 'Saving… almost done.', f < 1 ? 3 + Math.round(f*77) : 90), 150000);
+      const d = await postJson(payload, 150000);
+      clearInterval(iv);
       if (d.ok) return true;
       lastErr = d.error || 'error';
       if (/Missing required/i.test(lastErr)){ fatal = true; break; }
     } catch(e){ lastErr = e.message; }
+    clearInterval(iv);
     // it may have arrived even though the reply never came back
     upShow('Checking if it arrived…', 92);
     await sleep(2500);
@@ -428,7 +432,7 @@ async function sendSubmission(payload, isAssess){
   }
   upHide();
   if (!fatal) reportFail(lastErr, payload.name);
-  throw new Error(fatal ? ('Could not save: ' + lastErr) : 'retry');
+  const er = new Error(fatal ? ('Could not save: ' + lastErr) : 'retry'); er.reason = lastErr; throw er;
 }
 
 form.addEventListener('submit', async e => {
@@ -477,7 +481,7 @@ form.addEventListener('submit', async e => {
     upHide();
     btn.disabled = false; btn.textContent = 'Submit';
     showFormMsg(err.message === 'retry'
-      ? 'We could not confirm that your recitation arrived. It may already be with us. Please keep this page open, check your internet, and tap Submit again. It is safe: it will not be sent twice.'
+      ? 'We could not confirm that your recitation arrived. It may already be with us. Please keep this page open, check your internet, and tap Submit again. It is safe: it will not be sent twice. (Reason: ' + err.reason + ')'
       : 'Sorry, something went wrong: ' + err.message + '. Please tap Submit again.');
   } finally { sending = false; dropWakeLock(); }
 });
