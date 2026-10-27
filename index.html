@@ -180,6 +180,7 @@
 </fieldset>
 
 <div id="formMsg" class="msg err" hidden></div>
+<div id="upBox" hidden><div class="hint" id="upText" style="text-align:center"></div><progress id="upBar" max="100" value="0" style="width:100%;height:14px;margin-top:6px"></progress></div>
 <button type="submit" id="btnSubmit" class="btn-submit">Submit</button>
 </form>
 </div>
@@ -192,6 +193,8 @@
 
 </div>
 
+<!-- lame.min.js must sit in the same folder as this page. If it is missing, the form still works but sends a bigger file. -->
+<script src="lame.min.js"></script>
 <script>
 // ====== PASTE YOUR GOOGLE APPS SCRIPT WEB APP URL HERE ======
 const ENDPOINT = 'https://script.google.com/macros/s/AKfycbypw_dAY8H-netgsUBQeqgOmyS2hkk_ohUy365FofUrObv8zVXspnd8GcqrJO7W6_Pq/exec';
@@ -279,7 +282,9 @@ function stopRec(){
     $('recStatus').textContent = 'Tap the button to start.';
     return;
   }
-  wavBlob = encodeWav(downsample(merge(chunks), inRate, TARGET_RATE), TARGET_RATE);
+  const pcm = downsample(merge(chunks), inRate, TARGET_RATE);
+  wavBlob = encodeWav(pcm, TARGET_RATE);
+  startMp3(pcm);
   const p = $('player');
   if (p.src) URL.revokeObjectURL(p.src);
   p.src = URL.createObjectURL(wavBlob);
@@ -320,12 +325,33 @@ function encodeWav(samples, rate){
   return new Blob([v], { type: 'audio/wav' });
 }
 function resetRec(){
-  wavBlob = null; $('player').hidden = true; $('btnRedo').hidden = true; $('btnRec').hidden = false;
+  wavBlob = null; mp3Blob = null; mp3Job = null; mp3Token++; $('player').hidden = true; $('btnRedo').hidden = true; $('btnRec').hidden = false;
   $('timer').textContent = '00:00'; $('recStatus').textContent = 'Tap the button to start.'; recErr('');
 }
 $('btnRec').addEventListener('click', startRec);
 $('btnStop').addEventListener('click', stopRec);
 $('btnRedo').addEventListener('click', () => { resetRec(); startRec(); });
+
+/* ---------- Small MP3 (made in the background while the student listens) ---------- */
+let mp3Blob = null, mp3Job = null, mp3Token = 0;
+async function encodeMp3(f32, rate, kbps){
+  const pcm = new Int16Array(f32.length);
+  for (let i = 0; i < f32.length; i++){ const s = Math.max(-1, Math.min(1, f32[i])); pcm[i] = s < 0 ? s * 0x8000 : s * 0x7FFF; }
+  const enc = new lamejs.Mp3Encoder(1, rate, kbps), parts = [], step = 1152 * 10;
+  for (let i = 0, k = 0; i < pcm.length; i += step, k++){
+    const b = enc.encodeBuffer(pcm.subarray(i, i + step)); if (b.length) parts.push(new Int8Array(b));
+    if (k % 20 === 0) await new Promise(r => setTimeout(r, 0));
+  }
+  const last = enc.flush(); if (last.length) parts.push(new Int8Array(last));
+  return new Blob(parts, { type: 'audio/mpeg' });
+}
+function startMp3(pcm){
+  const my = ++mp3Token; mp3Blob = null;
+  mp3Job = (async () => {
+    try { if (!window.lamejs) return; const b = await encodeMp3(downsample(pcm, TARGET_RATE, 16000), 16000, 48); if (my === mp3Token) mp3Blob = b; }
+    catch(e){ /* fall back to the WAV */ }
+  })();
+}
 
 /* ---------- Submit ---------- */
 function toBase64(blob){
@@ -340,8 +366,74 @@ function val(n){ const e = form.querySelector('[name="'+n+'"]'); return e ? e.va
 function radio(n){ const e = form.querySelector('input[name="'+n+'"]:checked'); return e ? e.value : ''; }
 function showFormMsg(t){ const m = $('formMsg'); m.textContent = t; m.hidden = !t; if (t) m.scrollIntoView({behavior:'smooth', block:'center'}); }
 
+/* ---------- Safe sending: one ID per submission, progress, automatic retry, "did it arrive?" check ---------- */
+let submitId = '', sending = false, wakeLock = null;
+function newId(){
+  try { if (window.crypto && crypto.randomUUID) return crypto.randomUUID().replace(/-/g, ''); } catch(e){}
+  return Date.now().toString(36) + Math.random().toString(36).slice(2, 12) + Math.random().toString(36).slice(2, 10);
+}
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+function upShow(t, pct){ $('upBox').hidden = false; $('upText').textContent = t; $('upBar').value = pct || 0; }
+function upHide(){ $('upBox').hidden = true; }
+async function getWakeLock(){ try { if (navigator.wakeLock) wakeLock = await navigator.wakeLock.request('screen'); } catch(e){} }
+function dropWakeLock(){ try { if (wakeLock) wakeLock.release(); } catch(e){} wakeLock = null; }
+window.addEventListener('beforeunload', e => { if (sending){ e.preventDefault(); e.returnValue = ''; } });
+
+function postJson(obj, onProg, timeoutMs){
+  return new Promise((res, rej) => {
+    const x = new XMLHttpRequest();
+    x.open('POST', ENDPOINT); x.setRequestHeader('Content-Type', 'text/plain;charset=utf-8'); x.timeout = timeoutMs;
+    x.upload.onprogress = e => { if (e.lengthComputable) onProg(e.loaded / e.total); };
+    x.upload.onload = () => onProg(1);
+    x.onload = () => { try { res(JSON.parse(x.responseText)); } catch(e){ rej(new Error('bad reply')); } };
+    x.onerror = () => rej(new Error('network')); x.ontimeout = () => rej(new Error('timeout'));
+    x.send(JSON.stringify(obj));
+  });
+}
+async function alreadySaved(){
+  try { const r = await fetch(ENDPOINT + '?action=status&id=' + encodeURIComponent(submitId) + '&t=' + Date.now()); const d = await r.json(); return (d.ok && d.saved) ? d.receipt : null; }
+  catch(e){ return null; }
+}
+function reportFail(err, name){
+  try { fetch(ENDPOINT, { method:'POST', keepalive:true, headers:{'Content-Type':'text/plain;charset=utf-8'},
+    body: JSON.stringify({ action:'report', where:'student', name:name || '', id:submitId, error:String(err), ua:navigator.userAgent }) }).catch(()=>{}); } catch(e){}
+}
+function showThanks(isAssess){
+  upHide();
+  $('formView').hidden = true;
+  $('thanksText').textContent = isAssess
+    ? 'Your recitation has been received. An Al Amanah teacher will review it and contact you on WhatsApp.'
+    : 'We have received your details. An Al Amanah teacher will contact you on WhatsApp to guide you on the best way to begin.';
+  $('thanks').hidden = false;
+  window.scrollTo({top:0, behavior:'smooth'});
+}
+
+/** Sends the payload. Returns true when saved. Never sends the same submission twice (same ID). */
+async function sendSubmission(payload, isAssess){
+  const MAX = 4; let lastErr = '', fatal = false;
+  for (let n = 1; n <= MAX; n++){
+    const tryTxt = n === 1 ? 'Sending… please keep this page open.' : 'Sending again (try ' + n + ' of ' + MAX + ')… please keep this page open.';
+    upShow(tryTxt, 3);
+    try {
+      const d = await postJson(payload, f => upShow(f < 1 ? tryTxt : 'Saving… almost done.', f < 1 ? 3 + Math.round(f*77) : 90), 150000);
+      if (d.ok) return true;
+      lastErr = d.error || 'error';
+      if (/Missing required/i.test(lastErr)){ fatal = true; break; }
+    } catch(e){ lastErr = e.message; }
+    // it may have arrived even though the reply never came back
+    upShow('Checking if it arrived…', 92);
+    await sleep(2500);
+    if (await alreadySaved()) return true;
+    if (n < MAX){ upShow('The internet is slow. Trying again in a moment…', 5); await sleep(2500 * n); }
+  }
+  upHide();
+  if (!fatal) reportFail(lastErr, payload.name);
+  throw new Error(fatal ? ('Could not save: ' + lastErr) : 'retry');
+}
+
 form.addEventListener('submit', async e => {
   e.preventDefault();
+  if (sending) return;
   showFormMsg('');
   if (!form.checkValidity()){
     form.reportValidity();
@@ -356,31 +448,38 @@ form.addEventListener('submit', async e => {
   }
   if (ENDPOINT.indexOf('http') !== 0){ showFormMsg('This form is not connected yet (missing Apps Script URL).'); return; }
 
+  sending = true;
   const btn = $('btnSubmit');
-  btn.disabled = true; btn.textContent = isAssess ? 'Uploading your recitation… please wait' : 'Submitting…';
-
+  btn.disabled = true; btn.textContent = 'Sending… please wait';
+  if (!submitId) submitId = newId();
+  getWakeLock();
   try {
+    let audio = '', ext = '';
+    if (isAssess){
+      upShow('Getting your recording ready…', 3);
+      if (mp3Job){ try { await mp3Job; } catch(x){} }
+      const useMp3 = !!mp3Blob;
+      ext = useMp3 ? 'mp3' : 'wav';
+      audio = await toBase64(useMp3 ? mp3Blob : wavBlob);
+    }
     const payload = {
+      id: submitId, ext: ext,
       name: val('name'), age: val('age'), forWhom: radio('forWhom'), whatsapp: val('whatsapp'),
       email: val('email'), city: val('city'), language: radio('language'), level: radio('level'),
       help: !isAssess ? (radio('help') === 'Other' ? 'Other: ' + val('helpOther') : radio('help')) : '',
       previous: !isAssess ? radio('previous') : '',
       consent: isAssess ? radio('consent') : '',
-      audio: isAssess ? await toBase64(wavBlob) : ''
+      audio: audio
     };
-    const resp = await fetch(ENDPOINT, { method:'POST', headers:{'Content-Type':'text/plain;charset=utf-8'}, body: JSON.stringify(payload) });
-    const out = await resp.json();
-    if (!out.ok) throw new Error(out.error || 'Server error');
-    $('formView').hidden = true;
-    $('thanksText').textContent = isAssess
-      ? 'Your recitation has been received. An Al Amanah teacher will review it and contact you on WhatsApp.'
-      : 'We have received your details. An Al Amanah teacher will contact you on WhatsApp to guide you on the best way to begin.';
-    $('thanks').hidden = false;
-    window.scrollTo({top:0, behavior:'smooth'});
+    await sendSubmission(payload, isAssess);
+    showThanks(isAssess);
   } catch (err){
+    upHide();
     btn.disabled = false; btn.textContent = 'Submit';
-    showFormMsg('Sorry, something went wrong while submitting. Your recording is still here. Please check your internet connection and tap Submit again.');
-  }
+    showFormMsg(err.message === 'retry'
+      ? 'We could not confirm that your recitation arrived. It may already be with us. Please keep this page open, check your internet, and tap Submit again. It is safe: it will not be sent twice.'
+      : 'Sorry, something went wrong: ' + err.message + '. Please tap Submit again.');
+  } finally { sending = false; dropWakeLock(); }
 });
 </script>
 </body>
