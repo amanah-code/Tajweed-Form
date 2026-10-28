@@ -193,7 +193,7 @@
 
 </div>
 
-<p class="hint" style="text-align:center">page v3</p>
+<p class="hint" style="text-align:center">page v4</p>
 <!-- lame.min.js must sit in the same folder as this page. If it is missing, the form still works but sends a bigger file. -->
 <script src="lame.min.js"></script>
 <script>
@@ -414,6 +414,7 @@ async function sendSubmission(payload, isAssess){
   const MAX = 4; let lastErr = '', fatal = false;
   for (let n = 1; n <= MAX; n++){
     const tryTxt = n === 1 ? 'Sending… please keep this page open.' : 'Sending again (try ' + n + ' of ' + MAX + ')… please keep this page open.';
+    payload.attempt = n;
     upShow(tryTxt);
     const t0 = Date.now(), iv = setInterval(() => upShow(tryTxt + ' (' + Math.round((Date.now() - t0) / 1000) + ' s)'), 1000);
     try {
