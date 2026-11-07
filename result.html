@@ -45,6 +45,11 @@
       <p class="hint">Tap play. Use headphones if you can.</p>
     </section>
 
+    <section class="card" id="pendingCard" hidden>
+      <h2>Your teacher's audio feedback</h2>
+      <p class="hint">Your audio feedback is being prepared. Please check again soon.</p>
+    </section>
+
     <section class="card" id="reportCard" hidden>
       <h2>Your result</h2>
       <div class="report" id="report"></div>
@@ -66,9 +71,11 @@ function problem(msg){ $('loading').hidden = true; $('problemText').textContent 
     const d = JSON.parse(await r.text());
     if (!d.ok){ problem('We could not find this result. Please check your link or message us on WhatsApp.'); return; }
     $('hello').textContent = d.first ? 'Assalamu alaikum, ' + d.first : 'Assalamu alaikum';
-    if (d.fileId){
+    if (d.audioOk && d.fileId){
       $('player').src = 'https://drive.google.com/file/d/' + encodeURIComponent(d.fileId) + '/preview';
       $('audioCard').hidden = false;
+    } else {
+      $('pendingCard').hidden = false;
     }
     if (d.report && d.report.trim()){
       $('report').textContent = d.report;
