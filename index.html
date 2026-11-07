@@ -193,7 +193,7 @@
 
 </div>
 
-<p class="hint" style="text-align:center">page v4</p>
+<p class="hint" style="text-align:center">page v5</p>
 <!-- lame.min.js must sit in the same folder as this page. If it is missing, the form still works but sends a bigger file. -->
 <script src="lame.min.js"></script>
 <script>
@@ -391,6 +391,7 @@ async function postJson(obj, timeoutMs){
   finally { clearTimeout(tm); }
   try { return JSON.parse(txt); } catch(e){ throw new Error('got a web page instead of data: ' + txt.replace(/\s+/g,' ').slice(0, 100)); }
 }
+async function verifySaved(){ for (let i = 0; i < 3; i++){ const rc = await alreadySaved(); if (rc) return rc; await sleep(1500); } return null; }
 async function alreadySaved(){
   try { const r = await fetch(ENDPOINT + '?action=status&id=' + encodeURIComponent(submitId) + '&t=' + Date.now()); const d = await r.json(); return (d.ok && d.saved) ? d.receipt : null; }
   catch(e){ return null; }
@@ -420,8 +421,8 @@ async function sendSubmission(payload, isAssess){
     try {
       const d = await postJson(payload, 150000);
       clearInterval(iv);
-      if (d.ok) return true;
-      lastErr = d.error || 'error';
+      if (d.ok){ upShow('Making sure it was saved…', 95); if (await verifySaved()) return true; lastErr = 'Google said OK but the submission is not in the log yet'; }
+      else lastErr = d.error || 'error';
       if (/Missing required/i.test(lastErr)){ fatal = true; break; }
     } catch(e){ lastErr = e.message; }
     clearInterval(iv);
