@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Your Tajweed Assessment Result | Al Amanah</title>
+<link href="https://fonts.googleapis.com/css2?family=Jost:wght@300;400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{--gold:#b98f5c;--gold-d:#9d7646;--gold-l:#f6efe4;--ink:#242424;--muted:#6b6660;--line:#e6dccb;--bg:#fcfaf6}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:"Jost",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;line-height:1.6}
+  .wrap{max-width:560px;margin:0 auto;padding:16px 16px 56px}
+  header{background:#fff;border:1px solid var(--line);border-radius:18px;padding:22px 18px;text-align:center}
+  header h1{margin:0;font-size:1.05rem;font-weight:500;letter-spacing:.18em;text-transform:uppercase;color:var(--gold-d)}
+  header p{margin:4px 0 0;color:var(--muted);font-size:.9rem}
+  .card{background:#fff;border:1px solid var(--line);border-radius:16px;padding:22px 20px;margin-top:16px}
+  h2{margin:0 0 8px;font-size:1.2rem;font-weight:500;color:var(--gold-d)}
+  .hint{color:var(--muted);font-size:.95rem}
+  .report{white-space:pre-wrap;background:var(--gold-l);border:1px solid var(--line);border-radius:12px;padding:14px 16px}
+  iframe{width:100%;height:80px;border:0;border-radius:12px;background:var(--gold-l)}
+  .err{background:#fdecea;color:#b3261e;border-radius:10px;padding:10px 12px}
+  [hidden]{display:none!important}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Al Amanah International Academy</h1>
+    <p>Free Tajweed Assessment Result</p>
+  </header>
+
+  <section class="card" id="loading"><p class="hint">Loading your result&hellip;</p></section>
+  <section class="card" id="problem" hidden><div class="err" id="problemText"></div></section>
+
+  <div id="main" hidden>
+    <section class="card">
+      <h2 id="hello"></h2>
+      <p class="hint">Here is your teacher's feedback on your recitation.</p>
+    </section>
+
+    <section class="card" id="audioCard" hidden>
+      <h2>Your teacher's audio feedback</h2>
+      <iframe id="player" allow="autoplay" title="Teacher audio feedback"></iframe>
+      <p class="hint">Tap play. Use headphones if you can.</p>
+    </section>
+
+    <section class="card" id="reportCard" hidden>
+      <h2>Your result</h2>
+      <div class="report" id="report"></div>
+    </section>
+  </div>
+</div>
+
+<script>
+const ENDPOINT = 'https://script.google.com/macros/s/AKfycbyHaRaT-einiBjMzFRQ5EVBlvHfu5wWKNkuu8Ks3fzbt2FSy_gMStJSInRKVupw1l21/exec';
+const $ = id => document.getElementById(id);
+const t = new URLSearchParams(location.search).get('t');
+
+function problem(msg){ $('loading').hidden = true; $('problemText').textContent = msg; $('problem').hidden = false; }
+
+(async function(){
+  if (!t){ problem('This page must be opened from your private result link.'); return; }
+  try {
+    const r = await fetch(ENDPOINT + '?action=result&t=' + encodeURIComponent(t));
+    const d = JSON.parse(await r.text());
+    if (!d.ok){ problem('We could not find this result. Please check your link or message us on WhatsApp.'); return; }
+    $('hello').textContent = d.first ? 'Assalamu alaikum, ' + d.first : 'Assalamu alaikum';
+    if (d.fileId){
+      $('player').src = 'https://drive.google.com/file/d/' + encodeURIComponent(d.fileId) + '/preview';
+      $('audioCard').hidden = false;
+    }
+    if (d.report && d.report.trim()){
+      $('report').textContent = d.report;
+      $('reportCard').hidden = false;
+    }
+    $('loading').hidden = true; $('main').hidden = false;
+  } catch(e){
+    problem('Could not load your result. Please check your internet and try again.');
+  }
+})();
+</script>
+</body>
+</html>
